@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.connect(args.address)?;
 
-    socket.send(format!("\x0232 {} {}", args.rate, args.buffer).as_ref())?;
+    socket.send(format!("\x02{} {} {}", 32, args.rate, args.buffer).as_ref())?;
 
     let mut buf = vec![0u8; 1025];
 
