@@ -101,6 +101,10 @@ fn capture(stream: &StreamRef, sender: &Sender<Format>) -> anyhow::Result<()> {
         sender.send(Format::from_le_bytes(bin.try_into().unwrap()))?;
     }
 
+    for bin in samples[..end].iter_mut() {
+        *bin = 0;
+    }
+
     Ok(())
 }
 
