@@ -69,9 +69,11 @@ fn capture(stream: &StreamRef, sender: &UdpSocket, buf: &mut Vec<u8>) -> anyhow:
             continue;
         }
 
+        let size = bin.len()+1;
+
         buf[0] = DATA_SOUND;
-        buf[1..CHUNK_SIZE + 1].copy_from_slice(bin);
-        sender.send(&buf[..CHUNK_SIZE + 1])?;
+        buf[1..size].copy_from_slice(bin);
+        sender.send(&buf[..size])?;
     }
 
     Ok(())
