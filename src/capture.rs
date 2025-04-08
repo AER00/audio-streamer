@@ -8,6 +8,11 @@ mod wasapi;
 #[cfg(target_os = "windows")]
 pub use wasapi::stream;
 
+#[cfg(target_os = "macos")]
+mod coreaudio;
+#[cfg(target_os = "macos")]
+pub use coreaudio::stream;
+
 use byteorder::{ByteOrder, LittleEndian};
 use std::net::UdpSocket;
 
