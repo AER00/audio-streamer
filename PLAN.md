@@ -12,6 +12,9 @@ Bit depth and rate are taken from the config; the server is generic over
 
 Priority overview:
 
+Status: Phases 0-4 implemented; Phase 6 tests and CI landed, integration/soak
+runs outstanding; Phase 5 (Opus) is optional and not implemented.
+
 | Phase | Scope | Priority | Wire change |
 |---|---|---|---|
 | 0 | Baseline build + commit | — | no |
@@ -175,35 +178,38 @@ Verify: 60-minute soak with a deliberately skewed sender clock; bounded queue, n
 
 ---
 
-## Phase 4 — Sender latency (P2)
+## Phase 4 — Sender latency (P2) — implemented
 
-1. **macOS**: add `--frames N` (default 256); read `supported.buffer_size()`, clamp,
-   set `config.buffer_size = BufferSize::Fixed(n)`; fall back to `Default`.
-   Log the first callback's `data.len()`.
-2. **Packet size follows the callback** (Phase 2.3) so a loss costs <= ~8 ms.
-3. **PipeWire quantum**: `*pw::keys::NODE_LATENCY => format!("{}/{}", frames, rate)`.
-4. **Send errors must not exit**: `pipewire.rs` currently calls `std::process::exit(1)`;
-   log once per second, count, continue.
-5. Remove unused `ringbuf` and `coreaudio-rs` dependencies.
+1. **macOS**: `--frames N` sets `BufferSize::Fixed`, clamped to the device's
+   `SupportedBufferSize::Range`; `0` keeps the device default. The CLI default is
+   `0` everywhere except macOS, where it is `256`. The first callback logs its
+   actual frame count.
+2. **Packet size follows the callback** (Phase 2.3), so a loss costs <= ~8 ms.
+3. **PipeWire quantum**: when `--frames` is non-zero, `NODE_LATENCY` is set to
+   `frames/rate`. Zero keeps the previous behaviour.
+4. **Send errors must not exit**: PipeWire logs at most once per second and keeps
+   running; Windows retries the capture loop instead of terminating.
+5. Removed unused `ringbuf` and `coreaudio-rs` dependencies.
 
 ---
 
-## Phase 5 — Optional Opus (P3)
+## Phase 5 — Optional Opus (P3) — not implemented
 
-Only if bandwidth/loss is the bottleneck. Add `codec` to the config, 20 ms frames,
-`opus` crate behind a feature flag. ~10-20 ms extra latency. Not before Phase 1-3.
+Gated on a measured bandwidth/loss problem; the LAN link needs none of it, and
+encoding adds latency. If adopted: add `codec` to the config, 20 ms frames,
+`opus` crate behind a feature flag, ~10-20 ms extra latency. Requires libopus
+for every cross-compile target. Not before Phase 1-3 are stable.
 
 ---
 
 ## Phase 6 — Verification
 
-- Unit tests (none today): packet splitter, sequence-gap arithmetic, silence expansion
-  per bit depth, config parsing for v1/v2.
-- Integration: test sender with a known ramp; assert sample count and ordering.
-- Network: `tc qdisc add dev lo root netem loss 1% reorder 25% 50% delay 20ms`.
-- Soak: 60 min per client OS; track queue depth, underruns, drops, gaps.
-- CI: GitHub Actions matrix (`ubuntu-latest`, `windows-latest`, `macos-14`) with
-  `cargo check` + tests for both repos.
+- Unit tests: client wire helpers (`max_payload` alignment, header round-trip,
+  config packet) and server config parsing + `Jitter` policy. All passing.
+- CI: GitHub Actions matrix for both repos (`ubuntu-latest`,
+  `windows-latest`, `macos-14` for the client; Linux + Windows for the server).
+- Still to do: integration sender with a known ramp; `tc netem` loss/reorder
+  runs; 60-minute soak per client OS; track queue depth, underruns, drops, gaps.
 
 Acceptance: no handler errors, no process exits, no unbounded queue growth, no IP
 fragmentation, latency within per-phase budget.
