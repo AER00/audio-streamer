@@ -198,8 +198,9 @@ Verify: 60-minute soak with a deliberately skewed sender clock; bounded queue, n
 Both repos have an `opus` cargo feature, off by default.
 
 - Client: `--codec opus` (with `--features opus`) forces 16-bit, 48 kHz, stereo
-  capture, encodes 20 ms frames at 96 kbps, and sends config version 3 with a
-  trailing `opus` token. PCM remains the default and version 2.
+  capture, encodes 20 ms frames at `--bitrate` (default 96 kbps), and sends
+  config version 3 with a trailing `opus` token. PCM remains the default and
+  version 2.
 - Server: `--features opus` selects the decoder from the config; packets are
   decoded to i16 and fed through the same jitter buffer. Sequence gaps are
   concealed with up to 5 PLC frames instead of silence.
@@ -208,7 +209,7 @@ Both repos have an `opus` cargo feature, off by default.
 - Build: `opus 0.4` pulls `opusic-sys`, which builds libopus with cmake; every
   cross-compile target needs cmake available.
 - Usage: `cargo build --release --features opus` on both sides, then run the
-  client with `--codec opus`.
+  client with `--codec opus [--bitrate 128000]`.
 - Tests: client verifies 20 ms framing; server verifies decode and PLC length.
 
 ---

@@ -27,14 +27,18 @@ pub struct OpusEncoder {
 }
 
 impl OpusEncoder {
-    pub fn new(bitrate: i32) -> anyhow::Result<Self> {
+    pub fn new(bitrate: u32) -> anyhow::Result<Self> {
         let mut encoder = checked(opus::Encoder::new(
             RATE,
             opus::Channels::Stereo,
             opus::Application::Audio,
         ))?;
-        checked(encoder.set_bitrate(opus::Bitrate::Bits(bitrate)))?;
+
+        let bitrate = bitrate.clamp(500, 512_000);
+        checked(encoder.set_bitrate(opus::Bitrate::Bits(bitrate as i32)))?;
         checked(encoder.set_vbr(true))?;
+
+        eprintln!("opus: {} bps, {} ms frames", bitrate, FRAME_MS);
 
         Ok(Self {
             encoder,

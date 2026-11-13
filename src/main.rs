@@ -30,6 +30,10 @@ pub struct Args {
     #[arg(long, default_value = "pcm")]
     codec: String,
 
+    /// Opus bitrate in bits per second (500..=512000)
+    #[arg(long, default_value_t = 96_000)]
+    bitrate: u32,
+
     /// Server address
     #[arg(short, long)]
     address: String,
@@ -45,12 +49,17 @@ pub fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.codec.to_ascii_lowercase().as_str() {
-        capture::CODEC_PCM => {}
-        capture::CODEC_OPUS => {
-            #[cfg(not(feature = "opus"))]
-            anyhow::bail!("this build has no opus support; rebuild with --features opus");
-        }
+        capture::CODEC_PCM | capture::CODEC_OPUS => {}
         other => anyhow::bail!("unknown codec: {}", other),
+    }
+
+    #[cfg(not(feature = "opus"))]
+    if args.opus() {
+        anyhow::bail!("this build has no opus support; rebuild with --features opus");
+    }
+
+    if args.opus() && !(500..=512_000).contains(&args.bitrate) {
+        anyhow::bail!("opus bitrate must be between 500 and 512000");
     }
 
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;

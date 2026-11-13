@@ -157,7 +157,7 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
         #[cfg(feature = "opus")]
         {
             if use_opus {
-                Output::Opus(crate::codec::OpusEncoder::new(96_000)?)
+                Output::Opus(crate::codec::OpusEncoder::new(args.bitrate)?)
             } else {
                 Output::Pcm
             }
