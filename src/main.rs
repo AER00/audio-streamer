@@ -19,6 +19,11 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     bits: u16,
 
+    /// Capture buffer in frames. 0 keeps the device default.
+    /// Defaults to 256 on macOS to reduce latency.
+    #[arg(long, default_value_t = if cfg!(target_os = "macos") { 256 } else { 0 })]
+    frames: u32,
+
     /// Server address
     #[arg(short, long)]
     address: String,

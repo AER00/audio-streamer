@@ -2,7 +2,7 @@ use crate::capture::{
     max_payload, send_config, send_silence, write_header, CONFIG_INTERVAL, HEADER_SIZE, DATA_SOUND,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SizedSample, StreamConfig};
+use cpal::{BufferSize, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,10 +63,16 @@ fn run<T: WireSample>(
     let stream_socket = socket.clone();
     let mut seq: u32 = 0;
     let mut last_config = Instant::now();
+    let mut logged_frames = false;
 
     let input_stream = device.build_input_stream(
         config,
         move |data: &[T], _| {
+            if !logged_frames {
+                eprintln!("capture buffer: {} frames", data.len());
+                logged_frames = true;
+            }
+
             for chunk in data.chunks(frames_per_packet) {
                 seq = seq.wrapping_add(1);
 
@@ -141,7 +147,14 @@ pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
 
     let supported = input_device.default_input_config()?;
     let source_format = supported.sample_format();
-    let config: StreamConfig = supported.config();
+    let mut config: StreamConfig = supported.config();
+
+    // A fixed callback size cuts latency; clamp it to what the device allows.
+    if args.frames != 0 {
+        if let SupportedBufferSize::Range { min, max } = *supported.buffer_size() {
+            config.buffer_size = BufferSize::Fixed(args.frames.clamp(min, max));
+        }
+    }
 
     // Keep 16-bit sources at 16 bits instead of up-converting to 32
     let bits = if args.bits == 16 || (args.bits != 32 && source_format == SampleFormat::I16) {

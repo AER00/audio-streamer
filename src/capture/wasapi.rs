@@ -10,6 +10,12 @@ use wasapi::*;
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
 
+/// wasapi errors are `Box<dyn Error>` (not `Send + Sync`), so they cannot
+/// `?` into anyhow directly.
+fn checked<T, E: std::fmt::Display>(result: Result<T, E>) -> anyhow::Result<T> {
+    result.map_err(|e| anyhow::anyhow!("{}", e))
+}
+
 fn capture_loop(sender: &UdpSocket, rate: usize, bits: usize, server_buffer: u16) -> Res<()> {
     let device = get_default_device(&Direction::Render)?;
 
@@ -91,8 +97,8 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
 
     // The loopback capture carries the render endpoint's mix format. Use it to
     // pick the sample depth and rate instead of guessing.
-    let device = get_default_device(&Direction::Render)?;
-    let mix = device.get_iaudioclient()?.get_mixformat()?;
+    let device = checked(get_default_device(&Direction::Render))?;
+    let mix = checked(checked(device.get_iaudioclient())?.get_mixformat())?;
     let source_bits = mix.get_bitspersample();
 
     let bits = if args.bits == 16 || args.bits == 32 {
@@ -113,10 +119,14 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
 
     socket.set_nonblocking(true)?;
 
-    if let Err(e) = capture_loop(&socket, rate, bits, args.buffer) {
-        // panic!("{}", e);
-        eprintln!("{}", e);
-    }
+    // Keep the sender alive across transient capture failures.
+    loop {
+        if let Err(e) = capture_loop(&socket, rate, bits, args.buffer) {
+            eprintln!("capture error: {}", e);
+        }
 
-    Ok(())
+        // Re-announce the format in case the server restarted.
+        let _ = send_config(&socket, bits, rate as u32, args.buffer, 2);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }

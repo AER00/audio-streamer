@@ -54,6 +54,14 @@ pub fn write_header(buf: &mut [u8], tag: u8, seq: u32) {
     LittleEndian::write_u32(&mut buf[1..HEADER_SIZE], seq);
 }
 
+/// The config packet sent to the server before any audio.
+pub fn config_packet(bits: usize, rate: u32, buffer: u16, channels: usize) -> String {
+    format!(
+        "{}{} {} {} {} {}",
+        DATA_CONFIG as char, PROTOCOL_VERSION, bits, rate, buffer, channels
+    )
+}
+
 /// Tell the server which format follows and how to configure playback.
 pub fn send_config(
     sender: &UdpSocket,
@@ -62,11 +70,7 @@ pub fn send_config(
     buffer: u16,
     channels: usize,
 ) -> anyhow::Result<()> {
-    let packet = format!(
-        "{}{} {} {} {} {}",
-        DATA_CONFIG as char, PROTOCOL_VERSION, bits, rate, buffer, channels
-    );
-    sender.send(packet.as_bytes())?;
+    sender.send(config_packet(bits, rate, buffer, channels).as_bytes())?;
     Ok(())
 }
 
@@ -85,4 +89,36 @@ pub fn send_silence(
     LittleEndian::write_u16(&mut buf[HEADER_SIZE..size], byte_count as u16);
     sender.send(&buf[..size])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_stays_within_the_mtu_and_frame_aligned() {
+        for (sample_bytes, channels) in [(2, 2), (4, 2), (2, 6), (4, 8)] {
+            let payload = max_payload(sample_bytes, channels);
+            assert!(payload <= MAX_PAYLOAD);
+            assert_eq!(payload % (sample_bytes * channels), 0);
+        }
+    }
+
+    #[test]
+    fn payload_is_positive_even_for_absurd_channel_counts() {
+        assert!(max_payload(4, 64) > 0);
+    }
+
+    #[test]
+    fn header_round_trips() {
+        let mut buf = [0u8; HEADER_SIZE];
+        write_header(&mut buf, DATA_SOUND, 0xDEAD_BEEF);
+        assert_eq!(buf[0], DATA_SOUND);
+        assert_eq!(LittleEndian::read_u32(&buf[1..HEADER_SIZE]), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn config_packet_is_versioned() {
+        assert_eq!(config_packet(16, 48_000, 2048, 2), "\u{2}2 16 48000 2048 2");
+    }
 }

@@ -14,7 +14,7 @@ use spa::param::format_utils;
 use spa::pod::Pod;
 use std::net::UdpSocket;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 struct UserData {
     format: spa::param::audio::AudioInfoRaw,
@@ -117,11 +117,23 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
         format: Default::default(),
     };
 
-    let props = properties! {
-        *pw::keys::MEDIA_TYPE => "Audio",
-        *pw::keys::MEDIA_CATEGORY => "Capture",
-        *pw::keys::MEDIA_ROLE => "Music",
-        *pw::keys::STREAM_CAPTURE_SINK => "true",
+    let props = if args.frames != 0 {
+        let rate = if args.rate != 0 { args.rate } else { 48_000 };
+        let latency = format!("{}/{}", args.frames, rate);
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "Music",
+            *pw::keys::STREAM_CAPTURE_SINK => "true",
+            *pw::keys::NODE_LATENCY => latency,
+        }
+    } else {
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "Music",
+            *pw::keys::STREAM_CAPTURE_SINK => "true",
+        }
     };
 
     let stream = pw::stream::Stream::new(&core, "audio-capture", props)?;
@@ -132,6 +144,9 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
     let mut buf = vec![0u8; HEADER_SIZE + MAX_PAYLOAD];
     let mut seq: u32 = 0;
     let mut last_config = Instant::now();
+    let mut last_error = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
@@ -147,8 +162,11 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
             let payload = max_payload(sample_bytes, channels);
 
             if let Err(e) = capture(stream, &socket, &mut buf, &mut seq, payload) {
-                eprintln!("{}", e);
-                std::process::exit(1);
+                // A transient send error must not kill the sender.
+                if last_error.elapsed() >= Duration::from_secs(1) {
+                    eprintln!("{}", e);
+                    last_error = Instant::now();
+                }
             }
 
             if user_data.format.rate() != 0 && last_config.elapsed() >= CONFIG_INTERVAL {

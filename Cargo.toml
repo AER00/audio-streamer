@@ -9,9 +9,7 @@ edition = "2021"
 anyhow = "1"
 byteorder = "1.5.0"
 clap = { version = "4.3.2", features = ["derive"] }
-coreaudio-rs = "0.12.1"
 cpal = "0.15.3"
-ringbuf = "0.4.7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = "0.7.2"
