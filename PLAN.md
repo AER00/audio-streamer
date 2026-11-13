@@ -12,8 +12,8 @@ Bit depth and rate are taken from the config; the server is generic over
 
 Priority overview:
 
-Status: Phases 0-4 implemented; Phase 6 tests and CI landed, integration/soak
-runs outstanding; Phase 5 (Opus) is optional and not implemented.
+Status: Phases 0-4 and 6 implemented; Phase 5 (Opus) implemented behind the
+optional `opus` cargo feature; integration/soak runs outstanding.
 
 | Phase | Scope | Priority | Wire change |
 |---|---|---|---|
@@ -193,12 +193,23 @@ Verify: 60-minute soak with a deliberately skewed sender clock; bounded queue, n
 
 ---
 
-## Phase 5 — Optional Opus (P3) — not implemented
+## Phase 5 — Optional Opus (P3) — implemented behind a feature
 
-Gated on a measured bandwidth/loss problem; the LAN link needs none of it, and
-encoding adds latency. If adopted: add `codec` to the config, 20 ms frames,
-`opus` crate behind a feature flag, ~10-20 ms extra latency. Requires libopus
-for every cross-compile target. Not before Phase 1-3 are stable.
+Both repos have an `opus` cargo feature, off by default.
+
+- Client: `--codec opus` (with `--features opus`) forces 16-bit, 48 kHz, stereo
+  capture, encodes 20 ms frames at 96 kbps, and sends config version 3 with a
+  trailing `opus` token. PCM remains the default and version 2.
+- Server: `--features opus` selects the decoder from the config; packets are
+  decoded to i16 and fed through the same jitter buffer. Sequence gaps are
+  concealed with up to 5 PLC frames instead of silence.
+- The natively-16-bit wire path is unchanged; Opus is transport compression,
+  not a replacement for the PCM path.
+- Build: `opus 0.4` pulls `opusic-sys`, which builds libopus with cmake; every
+  cross-compile target needs cmake available.
+- Usage: `cargo build --release --features opus` on both sides, then run the
+  client with `--codec opus`.
+- Tests: client verifies 20 ms framing; server verifies decode and PLC length.
 
 ---
 
