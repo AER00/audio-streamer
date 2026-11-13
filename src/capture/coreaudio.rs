@@ -1,5 +1,6 @@
 use crate::capture::{
-    max_payload, send_config, send_silence, write_header, CONFIG_INTERVAL, HEADER_SIZE, DATA_SOUND,
+    max_payload, send_config, send_silence, write_header, Output, CONFIG_INTERVAL, CODEC_OPUS,
+    CODEC_PCM, HEADER_SIZE, DATA_SOUND,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
@@ -17,6 +18,8 @@ trait WireSample: SizedSample + Send + 'static {
 
     fn is_silent(&self) -> bool;
     fn write_le(&self, dst: &mut [u8]);
+    #[cfg(feature = "opus")]
+    fn to_i16(&self) -> i16;
 }
 
 impl WireSample for f32 {
@@ -31,6 +34,11 @@ impl WireSample for f32 {
         let pcm = (self * SCALE).clamp(-2147483648.0, 2147483647.0) as i32;
         dst.copy_from_slice(&pcm.to_le_bytes());
     }
+
+    #[cfg(feature = "opus")]
+    fn to_i16(&self) -> i16 {
+        (self * 32767.0).clamp(-32768.0, 32767.0) as i16
+    }
 }
 
 impl WireSample for i16 {
@@ -44,6 +52,11 @@ impl WireSample for i16 {
     fn write_le(&self, dst: &mut [u8]) {
         dst.copy_from_slice(&self.to_le_bytes());
     }
+
+    #[cfg(feature = "opus")]
+    fn to_i16(&self) -> i16 {
+        *self
+    }
 }
 
 fn run<T: WireSample>(
@@ -51,6 +64,8 @@ fn run<T: WireSample>(
     config: &StreamConfig,
     socket: Arc<UdpSocket>,
     server_buffer: u16,
+    mut sink: Output,
+    codec: &'static str,
 ) -> anyhow::Result<()> {
     let sample_rate = config.sample_rate.0;
     let channels = config.channels as usize;
@@ -64,6 +79,8 @@ fn run<T: WireSample>(
     let mut seq: u32 = 0;
     let mut last_config = Instant::now();
     let mut logged_frames = false;
+    #[cfg(feature = "opus")]
+    let mut pcm: Vec<i16> = Vec::new();
 
     let input_stream = device.build_input_stream(
         config,
@@ -73,35 +90,45 @@ fn run<T: WireSample>(
                 logged_frames = true;
             }
 
-            for chunk in data.chunks(frames_per_packet) {
-                seq = seq.wrapping_add(1);
+            match &mut sink {
+                Output::Pcm => {
+                    for chunk in data.chunks(frames_per_packet) {
+                        seq = seq.wrapping_add(1);
 
-                if chunk.iter().all(|sample| sample.is_silent()) {
-                    let _ = send_silence(
-                        &stream_socket,
-                        &mut send_buffer,
-                        seq,
-                        chunk.len() * T::BYTES,
-                    );
-                    continue;
+                        if chunk.iter().all(|sample| sample.is_silent()) {
+                            let _ = send_silence(
+                                &stream_socket,
+                                &mut send_buffer,
+                                seq,
+                                chunk.len() * T::BYTES,
+                            );
+                            continue;
+                        }
+
+                        let size = HEADER_SIZE + chunk.len() * T::BYTES;
+
+                        if send_buffer.len() < size {
+                            send_buffer.resize(size, 0);
+                        }
+
+                        write_header(&mut send_buffer, DATA_SOUND, seq);
+
+                        for (i, sample) in chunk.iter().enumerate() {
+                            sample.write_le(
+                                &mut send_buffer[HEADER_SIZE + i * T::BYTES
+                                    ..HEADER_SIZE + (i + 1) * T::BYTES],
+                            );
+                        }
+
+                        let _ = stream_socket.send(&send_buffer[..size]);
+                    }
                 }
-
-                let size = HEADER_SIZE + chunk.len() * T::BYTES;
-
-                if send_buffer.len() < size {
-                    send_buffer.resize(size, 0);
+                #[cfg(feature = "opus")]
+                Output::Opus(encoder) => {
+                    pcm.clear();
+                    pcm.extend(data.iter().map(|sample| sample.to_i16()));
+                    let _ = encoder.push(&pcm, &stream_socket, &mut seq, &mut send_buffer);
                 }
-
-                write_header(&mut send_buffer, DATA_SOUND, seq);
-
-                for (i, sample) in chunk.iter().enumerate() {
-                    sample.write_le(
-                        &mut send_buffer[HEADER_SIZE + i * T::BYTES
-                            ..HEADER_SIZE + (i + 1) * T::BYTES],
-                    );
-                }
-
-                let _ = stream_socket.send(&send_buffer[..size]);
             }
 
             if last_config.elapsed() >= CONFIG_INTERVAL {
@@ -111,6 +138,7 @@ fn run<T: WireSample>(
                     sample_rate,
                     server_buffer,
                     channels,
+                    codec,
                 );
                 last_config = Instant::now();
             }
@@ -120,7 +148,7 @@ fn run<T: WireSample>(
     )?;
 
     // Send initial configuration message
-    let _ = send_config(&socket, T::BITS, sample_rate, server_buffer, channels);
+    let _ = send_config(&socket, T::BITS, sample_rate, server_buffer, channels, codec);
 
     input_stream.play()?;
     // sleep for infinite time
@@ -148,6 +176,13 @@ pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
     let supported = input_device.default_input_config()?;
     let source_format = supported.sample_format();
     let mut config: StreamConfig = supported.config();
+    let use_opus = args.opus();
+
+    // Opus runs at 48 kHz.
+    #[cfg(feature = "opus")]
+    if use_opus {
+        config.sample_rate = cpal::SampleRate(crate::codec::RATE);
+    }
 
     // A fixed callback size cuts latency; clamp it to what the device allows.
     if args.frames != 0 {
@@ -156,17 +191,35 @@ pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
         }
     }
 
-    // Keep 16-bit sources at 16 bits instead of up-converting to 32
-    let bits = if args.bits == 16 || (args.bits != 32 && source_format == SampleFormat::I16) {
+    // Keep 16-bit sources at 16 bits instead of up-converting to 32.
+    let bits = if use_opus || args.bits == 16 || (args.bits != 32 && source_format == SampleFormat::I16)
+    {
         16
     } else {
         32
     };
 
+    let codec = if use_opus { CODEC_OPUS } else { CODEC_PCM };
+
+    let sink = {
+        #[cfg(feature = "opus")]
+        {
+            if use_opus {
+                Output::Opus(crate::codec::OpusEncoder::new(96_000)?)
+            } else {
+                Output::Pcm
+            }
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            Output::Pcm
+        }
+    };
+
     let socket = Arc::new(socket);
 
     match bits {
-        16 => run::<i16>(&input_device, &config, socket, args.buffer),
-        _ => run::<f32>(&input_device, &config, socket, args.buffer),
+        16 => run::<i16>(&input_device, &config, socket, args.buffer, sink, codec),
+        _ => run::<f32>(&input_device, &config, socket, args.buffer, sink, codec),
     }
 }

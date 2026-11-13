@@ -1,4 +1,6 @@
 mod capture;
+#[cfg(feature = "opus")]
+mod codec;
 
 use clap::Parser;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -24,13 +26,32 @@ pub struct Args {
     #[arg(long, default_value_t = if cfg!(target_os = "macos") { 256 } else { 0 })]
     frames: u32,
 
+    /// Audio codec: pcm or opus (opus requires the `opus` cargo feature)
+    #[arg(long, default_value = "pcm")]
+    codec: String,
+
     /// Server address
     #[arg(short, long)]
     address: String,
 }
 
+impl Args {
+    pub fn opus(&self) -> bool {
+        self.codec.eq_ignore_ascii_case(capture::CODEC_OPUS)
+    }
+}
+
 pub fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    match args.codec.to_ascii_lowercase().as_str() {
+        capture::CODEC_PCM => {}
+        capture::CODEC_OPUS => {
+            #[cfg(not(feature = "opus"))]
+            anyhow::bail!("this build has no opus support; rebuild with --features opus");
+        }
+        other => anyhow::bail!("unknown codec: {}", other),
+    }
 
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_nonblocking(true)?;

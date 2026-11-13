@@ -1,6 +1,6 @@
 use crate::capture::{
-    is_silence, max_payload, send_config, send_silence, write_header, CONFIG_INTERVAL, HEADER_SIZE,
-    MAX_PAYLOAD, DATA_SOUND,
+    is_silence, max_payload, send_config, send_silence, write_header, Output, CONFIG_INTERVAL,
+    CODEC_OPUS, CODEC_PCM, HEADER_SIZE, MAX_PAYLOAD, OPUS_RATE, DATA_SOUND,
 };
 use crate::Args;
 use anyhow::anyhow;
@@ -26,6 +26,7 @@ fn capture(
     buf: &mut Vec<u8>,
     seq: &mut u32,
     payload: usize,
+    output: &mut Output,
 ) -> anyhow::Result<()> {
     let mut buffer = stream.dequeue_buffer().ok_or(anyhow!("no buffers"))?;
 
@@ -39,21 +40,29 @@ fn capture(
 
     let samples = data.data().ok_or(anyhow!("no data"))?;
 
-    for bin in samples[..end].chunks(payload) {
-        *seq = seq.wrapping_add(1);
+    match output {
+        Output::Pcm => {
+            for bin in samples[..end].chunks(payload) {
+                *seq = seq.wrapping_add(1);
 
-        if is_silence(bin) {
-            send_silence(sender, buf, *seq, bin.len())?;
-            continue;
-        }
+                if is_silence(bin) {
+                    send_silence(sender, buf, *seq, bin.len())?;
+                    continue;
+                }
 
-        let size = HEADER_SIZE + bin.len();
-        if buf.len() < size {
-            buf.resize(size, 0);
+                let size = HEADER_SIZE + bin.len();
+                if buf.len() < size {
+                    buf.resize(size, 0);
+                }
+                write_header(buf, DATA_SOUND, *seq);
+                buf[HEADER_SIZE..size].copy_from_slice(bin);
+                sender.send(&buf[..size])?;
+            }
         }
-        write_header(buf, DATA_SOUND, *seq);
-        buf[HEADER_SIZE..size].copy_from_slice(bin);
-        sender.send(&buf[..size])?;
+        #[cfg(feature = "opus")]
+        Output::Opus(encoder) => {
+            encoder.push_bytes(&samples[..end], sender, seq, buf)?;
+        }
     }
 
     Ok(())
@@ -65,6 +74,7 @@ fn handle_param_change(
     param: Option<&Pod>,
     socket: &UdpSocket,
     buf_size: u16,
+    codec: &'static str,
 ) {
     // NULL means to clear the format
     let Some(param) = param else {
@@ -96,7 +106,7 @@ fn handle_param_change(
     };
     let channels = user_data.format.channels().max(1) as usize;
 
-    let _ = send_config(socket, bits, user_data.format.rate(), buf_size, channels);
+    let _ = send_config(socket, bits, user_data.format.rate(), buf_size, channels, codec);
 
     println!(
         "capturing rate:{} channels:{} bits:{}",
@@ -141,6 +151,22 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
     let socket = Arc::new(socket);
     let socket2 = socket.clone();
     let buffer_size = args.buffer;
+    let use_opus = args.opus();
+    let codec = if use_opus { CODEC_OPUS } else { CODEC_PCM };
+    let mut output = {
+        #[cfg(feature = "opus")]
+        {
+            if use_opus {
+                Output::Opus(crate::codec::OpusEncoder::new(96_000)?)
+            } else {
+                Output::Pcm
+            }
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            Output::Pcm
+        }
+    };
     let mut buf = vec![0u8; HEADER_SIZE + MAX_PAYLOAD];
     let mut seq: u32 = 0;
     let mut last_config = Instant::now();
@@ -151,7 +177,7 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .param_changed(move |_, id, user_data, param| {
-            handle_param_change(id, user_data, param, &socket2, buffer_size)
+            handle_param_change(id, user_data, param, &socket2, buffer_size, codec)
         })
         .process(move |stream, user_data| {
             let sample_bytes = match user_data.format.format() {
@@ -161,7 +187,7 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
             let channels = user_data.format.channels().max(1) as usize;
             let payload = max_payload(sample_bytes, channels);
 
-            if let Err(e) = capture(stream, &socket, &mut buf, &mut seq, payload) {
+            if let Err(e) = capture(stream, &socket, &mut buf, &mut seq, payload, &mut output) {
                 // A transient send error must not kill the sender.
                 if last_error.elapsed() >= Duration::from_secs(1) {
                     eprintln!("{}", e);
@@ -171,22 +197,31 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
 
             if user_data.format.rate() != 0 && last_config.elapsed() >= CONFIG_INTERVAL {
                 let bits = if sample_bytes == 2 { 16 } else { 32 };
-                let _ = send_config(&socket, bits, user_data.format.rate(), buffer_size, channels);
+                let _ = send_config(
+                    &socket,
+                    bits,
+                    user_data.format.rate(),
+                    buffer_size,
+                    channels,
+                    codec,
+                );
                 last_config = Instant::now();
             }
         })
         .register()?;
 
     let mut audio_info = spa::param::audio::AudioInfoRaw::new();
-    // Request the native depth: 16-bit sources stay 16-bit with --bits 16,
-    // otherwise the existing 32-bit path is kept.
-    audio_info.set_format(if args.bits == 16 {
+    // Opus needs S16LE at 48 kHz; otherwise request the native depth.
+    audio_info.set_format(if use_opus || args.bits == 16 {
         AudioFormat::S16LE
     } else {
         AudioFormat::S32LE
     });
 
-    if args.rate != 0 {
+    if use_opus {
+        audio_info.set_rate(OPUS_RATE);
+        audio_info.set_channels(2);
+    } else if args.rate != 0 {
         audio_info.set_rate(args.rate);
     }
 

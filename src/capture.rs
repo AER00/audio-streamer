@@ -24,12 +24,28 @@ pub const MAX_PAYLOAD: usize = 1400;
 pub const HEADER_SIZE: usize = 5;
 
 pub const PROTOCOL_VERSION: u8 = 2;
+/// Opus configs advertise version 3.
+pub const PROTOCOL_VERSION_OPUS: u8 = 3;
+
+pub const CODEC_PCM: &str = "pcm";
+pub const CODEC_OPUS: &str = "opus";
+
+/// Opus always runs at 48 kHz.
+#[allow(dead_code)] // only referenced by the opus code path
+pub const OPUS_RATE: u32 = 48_000;
+
+/// What the capture backends do with the samples they receive.
+pub enum Output {
+    Pcm,
+    #[cfg(feature = "opus")]
+    Opus(crate::codec::OpusEncoder),
+}
 
 /// Resend the config this often so a restarted server re-syncs.
 pub const CONFIG_INTERVAL: Duration = Duration::from_secs(2);
 
 const DATA_SILENCE: u8 = 0;
-const DATA_SOUND: u8 = 1;
+pub const DATA_SOUND: u8 = 1;
 const DATA_CONFIG: u8 = 2;
 
 #[cfg(target_os = "linux")]
@@ -55,10 +71,22 @@ pub fn write_header(buf: &mut [u8], tag: u8, seq: u32) {
 }
 
 /// The config packet sent to the server before any audio.
-pub fn config_packet(bits: usize, rate: u32, buffer: u16, channels: usize) -> String {
+pub fn config_packet(
+    bits: usize,
+    rate: u32,
+    buffer: u16,
+    channels: usize,
+    codec: &str,
+) -> String {
+    let version = if codec == CODEC_OPUS {
+        PROTOCOL_VERSION_OPUS
+    } else {
+        PROTOCOL_VERSION
+    };
+
     format!(
-        "{}{} {} {} {} {}",
-        DATA_CONFIG as char, PROTOCOL_VERSION, bits, rate, buffer, channels
+        "{}{} {} {} {} {} {}",
+        DATA_CONFIG as char, version, bits, rate, buffer, channels, codec
     )
 }
 
@@ -69,8 +97,9 @@ pub fn send_config(
     rate: u32,
     buffer: u16,
     channels: usize,
+    codec: &str,
 ) -> anyhow::Result<()> {
-    sender.send(config_packet(bits, rate, buffer, channels).as_bytes())?;
+    sender.send(config_packet(bits, rate, buffer, channels, codec).as_bytes())?;
     Ok(())
 }
 
@@ -119,6 +148,13 @@ mod tests {
 
     #[test]
     fn config_packet_is_versioned() {
-        assert_eq!(config_packet(16, 48_000, 2048, 2), "\u{2}2 16 48000 2048 2");
+        assert_eq!(
+            config_packet(16, 48_000, 2048, 2, CODEC_PCM),
+            "\u{2}2 16 48000 2048 2 pcm"
+        );
+        assert_eq!(
+            config_packet(16, 48_000, 2048, 2, CODEC_OPUS),
+            "\u{2}3 16 48000 2048 2 opus"
+        );
     }
 }
