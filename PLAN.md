@@ -82,9 +82,10 @@ Default is **drop/insert, no resampling**:
 
 - Correct only in the native integer domain; no new dependency.
 - Keep the queue at half the `--latency` buffer (default ~40 ms), with a ±10 ms dead band.
-- Queue too deep: drop one interleaved frame with a 2-4 frame crossfade.
-- Queue too shallow: hold (duplicate) the previous frame with the same crossfade.
-- Whole frames only, so L/R cannot swap. Rate-limit to one correction per few ms.
+- Queue too deep: consume two frames and emit their blend, removing one frame.
+- Queue too shallow: emit the blend of the held frame and the next queued frame,
+  then emit that frame next — one extra frame, one-frame crossfade.
+- Whole frames only, so L/R cannot swap. At most one correction per 100 ms.
 
 Resampling is out of scope. rubato is a fallback only for mismatched nominal rates
 (>1 % error), not for drift. Research notes: rubato 5.1.0 (MIT/Apache) has `Slip`
@@ -156,12 +157,19 @@ Verify: restart the server mid-stream; `tc netem loss 1%` yields counted gaps.
 
 ## Phase 3 — Jitter buffer and clock drift (P1, depends on Phase 2)
 
-1. Replace the immediate channel->ALSA/WASAPI feed with an explicit queue holding
-   `--latency` ms (default ~40). Start at half.
-2. Underrun: insert silence (existing behaviour). Overrun: apply the drop/insert policy
-   above; never block the socket thread.
-3. Ingress uses `try_send` (2.5); capacity derived from `--latency`, not 16384 samples.
-4. No resampling (see decision above).
+Implemented as `Jitter` in `server/src/playback.rs`:
+
+1. `Jitter::new(rate, latency_ms)` sets the target depth from `--latency`
+   (default 40 ms), clamped to half the queue capacity, with a ±10 ms band.
+2. `next_frame` pulls one interleaved frame per call. Too deep: consume two frames
+   and emit their blend (removes one). Too shallow: emit a blend of the held frame
+   and the next queued frame, then emit that frame next (adds one). Both use a
+   one-frame crossfade and are rate-limited to once per 100 ms.
+3. Before playback starts it blocks for data; after starting, an empty queue
+   yields whole frames of silence.
+4. Both ALSA and WASAPI playback use it; the old pair-toggling fill logic is gone.
+5. Ingress uses `try_send` (Phase 2.5); no resampling.
+6. Unit tests cover insert, drop, in-band, and pre-start behaviour.
 
 Verify: 60-minute soak with a deliberately skewed sender clock; bounded queue, no clicks.
 
