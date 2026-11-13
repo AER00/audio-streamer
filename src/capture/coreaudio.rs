@@ -72,6 +72,9 @@ fn run<T: WireSample>(
     let payload = max_payload(T::BYTES, channels);
     let frames_per_packet = payload / (T::BYTES * channels).max(1);
 
+    // Opus always decodes to 16-bit on the server, whatever we capture in.
+    let wire_bits = if codec == CODEC_OPUS { 16 } else { T::BITS };
+
     // Reused across callbacks; after the first packet this never reallocates
     let mut send_buffer: Vec<u8> = Vec::with_capacity(HEADER_SIZE + payload);
 
@@ -134,7 +137,7 @@ fn run<T: WireSample>(
             if last_config.elapsed() >= CONFIG_INTERVAL {
                 let _ = send_config(
                     &stream_socket,
-                    T::BITS,
+                    wire_bits,
                     sample_rate,
                     server_buffer,
                     channels,
@@ -148,7 +151,14 @@ fn run<T: WireSample>(
     )?;
 
     // Send initial configuration message
-    let _ = send_config(&socket, T::BITS, sample_rate, server_buffer, channels, codec);
+    let _ = send_config(
+        &socket,
+        wire_bits,
+        sample_rate,
+        server_buffer,
+        channels,
+        codec,
+    );
 
     input_stream.play()?;
     // sleep for infinite time
@@ -192,8 +202,15 @@ pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
     }
 
     // Keep 16-bit sources at 16 bits instead of up-converting to 32.
-    let bits = if use_opus || args.bits == 16 || (args.bits != 32 && source_format == SampleFormat::I16)
-    {
+    // Opus still captures in the device's native format and converts in the
+    // callback: not every device (BlackHole, for one) accepts i16 streams.
+    let bits = if use_opus {
+        if source_format == SampleFormat::I16 {
+            16
+        } else {
+            32
+        }
+    } else if args.bits == 16 || (args.bits != 32 && source_format == SampleFormat::I16) {
         16
     } else {
         32
