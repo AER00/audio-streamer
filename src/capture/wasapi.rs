@@ -1,4 +1,4 @@
-use crate::capture::{send_silence, CHUNK_SIZE, DATA_SOUND};
+use crate::capture::{send_config, send_silence, CHUNK_SIZE, DATA_SOUND};
 use crate::Args;
 use std::collections::VecDeque;
 use std::error;
@@ -7,12 +7,12 @@ use wasapi::*;
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
 
-fn capture_loop(sender: &UdpSocket, rate: usize) -> Res<()> {
+fn capture_loop(sender: &UdpSocket, rate: usize, bits: usize) -> Res<()> {
     let device = get_default_device(&Direction::Render)?;
 
     let mut audio_client = device.get_iaudioclient()?;
 
-    let desired_format = WaveFormat::new(32, 32, &SampleType::Int, rate, 2, None);
+    let desired_format = WaveFormat::new(bits, bits, &SampleType::Int, rate, 2, None);
 
     let blockalign = desired_format.get_blockalign();
 
@@ -77,18 +77,31 @@ fn capture_loop(sender: &UdpSocket, rate: usize) -> Res<()> {
 pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
     initialize_mta()?;
 
-    let mut rate = args.rate as usize;
-    if rate == 0 {
-        rate = 44100;
-    }
+    // The loopback capture carries the render endpoint's mix format. Use it to
+    // pick the sample depth and rate instead of guessing.
+    let device = get_default_device(&Direction::Render)?;
+    let mix = device.get_iaudioclient()?.get_mixformat()?;
+    let source_bits = mix.get_bitspersample();
 
-    socket
-        .send(format!("\x02{} {} {}", 32, rate, args.buffer).as_ref())
-        .unwrap();
+    let bits = if args.bits == 16 || args.bits == 32 {
+        args.bits as usize
+    } else if source_bits == 16 {
+        16
+    } else {
+        32
+    };
+
+    let rate = if args.rate != 0 {
+        args.rate as usize
+    } else {
+        mix.get_samplespersec() as usize
+    };
+
+    send_config(&socket, bits, rate as u32, args.buffer)?;
 
     socket.set_nonblocking(true)?;
 
-    if let Err(e) = capture_loop(&socket, rate) {
+    if let Err(e) = capture_loop(&socket, rate, bits) {
         // panic!("{}", e);
         eprintln!("{}", e);
     }

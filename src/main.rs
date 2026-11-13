@@ -15,6 +15,10 @@ pub struct Args {
     #[arg(short, long, default_value_t = 2048)]
     buffer: u16,
 
+    /// Sample bit depth (16 or 32). 0 follows the source format
+    #[arg(long, default_value_t = 0)]
+    bits: u16,
+
     /// Server address
     #[arg(short, long)]
     address: String,

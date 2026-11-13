@@ -1,4 +1,4 @@
-use crate::capture::{is_silence, send_silence, CHUNK_SIZE, DATA_SOUND};
+use crate::capture::{is_silence, send_config, send_silence, CHUNK_SIZE, DATA_SOUND};
 use crate::Args;
 use anyhow::anyhow;
 use pipewire as pw;
@@ -6,6 +6,7 @@ use pipewire::stream::StreamRef;
 use pipewire::{properties, Context, MainLoop};
 use pw::spa;
 use spa::format::{MediaSubtype, MediaType};
+use spa::param::audio::AudioFormat;
 use spa::param::format_utils;
 use spa::pod::Pod;
 use std::net::UdpSocket;
@@ -75,14 +76,18 @@ fn handle_param_change(
         .parse(param)
         .expect("Failed to parse param changed to AudioInfoRaw");
 
-    socket
-        .send(format!("\x02{} {} {}", 32, user_data.format.rate(), buf_size).as_ref())
-        .unwrap();
+    let bits = match user_data.format.format() {
+        AudioFormat::S16LE => 16,
+        _ => 32,
+    };
+
+    let _ = send_config(socket, bits, user_data.format.rate(), buf_size);
 
     println!(
-        "capturing rate:{} channels:{}",
+        "capturing rate:{} channels:{} bits:{}",
         user_data.format.rate(),
-        user_data.format.channels()
+        user_data.format.channels(),
+        bits
     );
 }
 
@@ -125,7 +130,13 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
         .register()?;
 
     let mut audio_info = spa::param::audio::AudioInfoRaw::new();
-    audio_info.set_format(spa::param::audio::AudioFormat::S32LE);
+    // Request the native depth: 16-bit sources stay 16-bit with --bits 16,
+    // otherwise the existing 32-bit path is kept.
+    audio_info.set_format(if args.bits == 16 {
+        AudioFormat::S16LE
+    } else {
+        AudioFormat::S32LE
+    });
 
     if args.rate != 0 {
         audio_info.set_rate(args.rate);

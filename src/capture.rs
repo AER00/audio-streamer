@@ -20,6 +20,7 @@ const CHUNK_SIZE: usize = 1024;
 
 const DATA_SILENCE: u8 = 0;
 const DATA_SOUND: u8 = 1;
+const DATA_CONFIG: u8 = 2;
 
 #[cfg(target_os = "linux")]
 pub fn is_silence(bin: &[u8]) -> bool {
@@ -29,6 +30,23 @@ pub fn is_silence(bin: &[u8]) -> bool {
         }
     }
     return true;
+}
+
+/// Tell the server which sample format follows and how to configure playback.
+pub fn send_config(
+    sender: &UdpSocket,
+    bits: usize,
+    rate: u32,
+    buffer: u16,
+) -> anyhow::Result<()> {
+    sender.send(
+        format!(
+            "{}{} {} {}",
+            DATA_CONFIG as char, bits, rate, buffer
+        )
+        .as_bytes(),
+    )?;
+    Ok(())
 }
 
 pub fn send_silence(sender: &UdpSocket, buf: &mut Vec<u8>, size: usize) -> anyhow::Result<()> {
