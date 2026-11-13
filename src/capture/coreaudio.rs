@@ -1,8 +1,11 @@
-use crate::capture::{send_config, send_silence, DATA_SOUND};
+use crate::capture::{
+    max_payload, send_config, send_silence, write_header, CONFIG_INTERVAL, HEADER_SIZE, DATA_SOUND,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SizedSample, StreamConfig};
 use std::net::UdpSocket;
 use std::sync::Arc;
+use std::time::Instant;
 
 const SILENCE_THRESHOLD: f32 = 0.00001;
 const SCALE: f32 = 2147483648.0;
@@ -49,39 +52,69 @@ fn run<T: WireSample>(
     socket: Arc<UdpSocket>,
     server_buffer: u16,
 ) -> anyhow::Result<()> {
-    // Grow on demand; after the first callback this never reallocates
-    let mut send_buffer: Vec<u8> = Vec::new();
+    let sample_rate = config.sample_rate.0;
+    let channels = config.channels as usize;
+    let payload = max_payload(T::BYTES, channels);
+    let frames_per_packet = payload / (T::BYTES * channels).max(1);
+
+    // Reused across callbacks; after the first packet this never reallocates
+    let mut send_buffer: Vec<u8> = Vec::with_capacity(HEADER_SIZE + payload);
 
     let stream_socket = socket.clone();
+    let mut seq: u32 = 0;
+    let mut last_config = Instant::now();
 
     let input_stream = device.build_input_stream(
         config,
         move |data: &[T], _| {
-            let size = 1 + data.len() * T::BYTES;
+            for chunk in data.chunks(frames_per_packet) {
+                seq = seq.wrapping_add(1);
 
-            if send_buffer.len() < size {
-                send_buffer.resize(size, 0);
+                if chunk.iter().all(|sample| sample.is_silent()) {
+                    let _ = send_silence(
+                        &stream_socket,
+                        &mut send_buffer,
+                        seq,
+                        chunk.len() * T::BYTES,
+                    );
+                    continue;
+                }
+
+                let size = HEADER_SIZE + chunk.len() * T::BYTES;
+
+                if send_buffer.len() < size {
+                    send_buffer.resize(size, 0);
+                }
+
+                write_header(&mut send_buffer, DATA_SOUND, seq);
+
+                for (i, sample) in chunk.iter().enumerate() {
+                    sample.write_le(
+                        &mut send_buffer[HEADER_SIZE + i * T::BYTES
+                            ..HEADER_SIZE + (i + 1) * T::BYTES],
+                    );
+                }
+
+                let _ = stream_socket.send(&send_buffer[..size]);
             }
 
-            if data.iter().all(|sample| sample.is_silent()) {
-                let _ = send_silence(&stream_socket, &mut send_buffer, data.len() * T::BYTES + 1);
-                return;
+            if last_config.elapsed() >= CONFIG_INTERVAL {
+                let _ = send_config(
+                    &stream_socket,
+                    T::BITS,
+                    sample_rate,
+                    server_buffer,
+                    channels,
+                );
+                last_config = Instant::now();
             }
-
-            send_buffer[0] = DATA_SOUND;
-
-            for (i, sample) in data.iter().enumerate() {
-                sample.write_le(&mut send_buffer[1 + i * T::BYTES..1 + (i + 1) * T::BYTES]);
-            }
-
-            let _ = stream_socket.send(&send_buffer[..size]);
         },
         |err| eprintln!("Stream error: {}", err),
         None,
     )?;
 
     // Send initial configuration message
-    let _ = send_config(&socket, T::BITS, config.sample_rate.0, server_buffer);
+    let _ = send_config(&socket, T::BITS, sample_rate, server_buffer, channels);
 
     input_stream.play()?;
     // sleep for infinite time

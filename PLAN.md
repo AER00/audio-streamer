@@ -138,8 +138,9 @@ the server. Map `WasapiRes` errors into `anyhow` instead of unwrapping.
 1. **Versioned config, backward compatible**: `\x02{version} {bits} {rate} {buffer} {channels}`;
    parse positionally so 3-field v1 packets still work (version 1, channels 2).
 2. **Sequence numbers**: every packet carries `u32 LE` after the tag:
-   `[1][seq][samples]`, `[0][seq][count]`. Track expected sequence, count gaps, cap
-   inserted silence at ~100 ms.
+   `[1][seq][samples]`, `[0][seq][count]`. Track the expected sequence and count
+   gaps; concealment is handled by the Phase 3 jitter buffer.
+   Stats (gaps, drops, queue depth) print every 5 s when non-zero.
 3. **MTU cap**: split capture buffers into payloads <= 1400 bytes. Windows currently
    sends 8193 bytes; macOS sends the whole callback. Shared splitter in `client/src/capture.rs`.
 4. **Periodic config**: resend every ~2 s so a restarted server self-heals; keep the

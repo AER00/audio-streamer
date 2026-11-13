@@ -1,4 +1,7 @@
-use crate::capture::{is_silence, send_config, send_silence, CHUNK_SIZE, DATA_SOUND};
+use crate::capture::{
+    is_silence, max_payload, send_config, send_silence, write_header, CONFIG_INTERVAL, HEADER_SIZE,
+    MAX_PAYLOAD, DATA_SOUND,
+};
 use crate::Args;
 use anyhow::anyhow;
 use pipewire as pw;
@@ -11,12 +14,19 @@ use spa::param::format_utils;
 use spa::pod::Pod;
 use std::net::UdpSocket;
 use std::sync::Arc;
+use std::time::Instant;
 
 struct UserData {
     format: spa::param::audio::AudioInfoRaw,
 }
 
-fn capture(stream: &StreamRef, sender: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<()> {
+fn capture(
+    stream: &StreamRef,
+    sender: &UdpSocket,
+    buf: &mut Vec<u8>,
+    seq: &mut u32,
+    payload: usize,
+) -> anyhow::Result<()> {
     let mut buffer = stream.dequeue_buffer().ok_or(anyhow!("no buffers"))?;
 
     let datas = buffer.datas_mut();
@@ -29,16 +39,20 @@ fn capture(stream: &StreamRef, sender: &UdpSocket, buf: &mut Vec<u8>) -> anyhow:
 
     let samples = data.data().ok_or(anyhow!("no data"))?;
 
-    for bin in samples[..end].chunks(CHUNK_SIZE) {
-        let size = bin.len() + 1;
+    for bin in samples[..end].chunks(payload) {
+        *seq = seq.wrapping_add(1);
 
         if is_silence(bin) {
-            send_silence(sender, buf, size)?;
+            send_silence(sender, buf, *seq, bin.len())?;
             continue;
         }
 
-        buf[0] = DATA_SOUND;
-        buf[1..size].copy_from_slice(bin);
+        let size = HEADER_SIZE + bin.len();
+        if buf.len() < size {
+            buf.resize(size, 0);
+        }
+        write_header(buf, DATA_SOUND, *seq);
+        buf[HEADER_SIZE..size].copy_from_slice(bin);
         sender.send(&buf[..size])?;
     }
 
@@ -80,8 +94,9 @@ fn handle_param_change(
         AudioFormat::S16LE => 16,
         _ => 32,
     };
+    let channels = user_data.format.channels().max(1) as usize;
 
-    let _ = send_config(socket, bits, user_data.format.rate(), buf_size);
+    let _ = send_config(socket, bits, user_data.format.rate(), buf_size, channels);
 
     println!(
         "capturing rate:{} channels:{} bits:{}",
@@ -114,17 +129,32 @@ pub fn stream(socket: UdpSocket, args: &Args) -> anyhow::Result<()> {
     let socket = Arc::new(socket);
     let socket2 = socket.clone();
     let buffer_size = args.buffer;
-    let mut buf = vec![0u8; 2048];
+    let mut buf = vec![0u8; HEADER_SIZE + MAX_PAYLOAD];
+    let mut seq: u32 = 0;
+    let mut last_config = Instant::now();
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .param_changed(move |_, id, user_data, param| {
             handle_param_change(id, user_data, param, &socket2, buffer_size)
         })
-        .process(move |stream, _| {
-            if let Err(e) = capture(stream, &socket, &mut buf) {
+        .process(move |stream, user_data| {
+            let sample_bytes = match user_data.format.format() {
+                AudioFormat::S16LE => 2,
+                _ => 4,
+            };
+            let channels = user_data.format.channels().max(1) as usize;
+            let payload = max_payload(sample_bytes, channels);
+
+            if let Err(e) = capture(stream, &socket, &mut buf, &mut seq, payload) {
                 eprintln!("{}", e);
                 std::process::exit(1);
+            }
+
+            if user_data.format.rate() != 0 && last_config.elapsed() >= CONFIG_INTERVAL {
+                let bits = if sample_bytes == 2 { 16 } else { 32 };
+                let _ = send_config(&socket, bits, user_data.format.rate(), buffer_size, channels);
+                last_config = Instant::now();
             }
         })
         .register()?;
