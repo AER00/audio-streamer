@@ -15,9 +15,17 @@ fn is_silence(samples: &[S]) -> bool {
 pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
     let host = cpal::default_host();
     // Find input device matching name
+    let input_devices = host.input_devices()?;
+    for device in input_devices {
+        println!("{}", device.name()?);
+    }
+
+    let name = "BlackHole 2ch";
+    //let name = "Urządzenie zespolone";
+
     let input_device = host
         .input_devices()?
-        .find(|device| device.name().unwrap() == "BlackHole 2ch")
+        .find(|device| device.name().unwrap() == name)
         .expect("Failed to find input device");
 
     let config: cpal::StreamConfig = input_device.default_input_config()?.into();
@@ -42,9 +50,15 @@ pub fn stream(socket: UdpSocket, args: &crate::Args) -> anyhow::Result<()> {
 
             // Write samples directly into the send buffer, no intermediary Vec
             let scale = 0x8000 as f32 * 0x10000 as f32; // 2147483648
-            for (i, &sample) in data[0..buffer_size].iter().enumerate() {
+            let mut counter = 0;
+            for (i, &sample) in data[0..1024].iter().enumerate() {
                 let pcm_i32 = (sample * scale).clamp(-2147483648.0, 2147483647.0) as i32;
+                //let i = counter;
                 send_buffer[1 + i * 4..1 + (i + 1) * 4].copy_from_slice(&pcm_i32.to_le_bytes());
+                //counter += 1;
+                //let i = counter;
+                //send_buffer[1 + i * 4..1 + (i + 1) * 4].copy_from_slice(&pcm_i32.to_le_bytes());
+                //counter += 1;
             }
             // Send directly from our pre-allocated buffer
             socket.send(&send_buffer[..1 + buffer_size * 4]).unwrap();
